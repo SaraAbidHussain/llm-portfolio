@@ -8,3 +8,10 @@ __pycache__/
 chroma_db/
 .ipynb_checkpoints/
 packages.microsoft.gpg
+chroma_db/
+chroma_db_streamlit/
+temp_sample.txt
+sample.txt
+packages.microsoft.gpg
+__pycache__/
+*.pyc
