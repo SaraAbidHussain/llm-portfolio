@@ -86,7 +86,7 @@ st.markdown("""
 """, unsafe_allow_html=True)
 
 # ─── CONSTANTS ────────────────────────────────────────────
-CHROMA_PATH = "./chroma_db_streamlit"
+CHROMA_PATH = "/tmp/chroma_db"
 CHUNK_SIZE = 1000
 CHUNK_OVERLAP = 200
 TOP_K = 3
