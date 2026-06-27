@@ -14,68 +14,121 @@ from langchain_text_splitters import RecursiveCharacterTextSplitter
 from langchain_huggingface import HuggingFaceEmbeddings
 from langchain_chroma import Chroma
 from langchain_mistralai import ChatMistralAI
-from langchain_core.prompts import ChatPromptTemplate
+from langchain_core.prompts import ChatPromptTemplate, MessagesPlaceholder
 from langchain_core.runnables import RunnablePassthrough
 from langchain_core.output_parsers import StrOutputParser
+from langchain_core.messages import HumanMessage, AIMessage
 
 load_dotenv()
 
-st.set_page_config(page_title="DocuChat", page_icon="📄", layout="wide")
+# ─── PAGE CONFIG ──────────────────────────────────────────
+st.set_page_config(
+    page_title="DocuChat",
+    page_icon="📄",
+    layout="wide"
+)
 
+# ─── STYLING ──────────────────────────────────────────────
 st.markdown("""
 <style>
     .main { padding: 0rem 1rem; }
     .user-message {
-        background: #2563eb; color: white;
-        padding: 12px 16px; border-radius: 18px 18px 4px 18px;
-        margin: 8px 0; margin-left: 20%;
-        text-align: right; font-size: 15px; line-height: 1.5;
+        background: #2563eb;
+        color: white;
+        padding: 12px 16px;
+        border-radius: 18px 18px 4px 18px;
+        margin: 8px 0;
+        margin-left: 20%;
+        text-align: right;
+        font-size: 15px;
+        line-height: 1.5;
     }
     .bot-message {
-        background: #f1f5f9; color: #1e293b;
-        padding: 12px 16px; border-radius: 18px 18px 18px 4px;
-        margin: 8px 0; margin-right: 20%;
-        font-size: 15px; line-height: 1.5;
+        background: #f1f5f9;
+        color: #1e293b;
+        padding: 12px 16px;
+        border-radius: 18px 18px 18px 4px;
+        margin: 8px 0;
+        margin-right: 20%;
+        font-size: 15px;
+        line-height: 1.5;
         border-left: 3px solid #2563eb;
     }
     .source-chunk {
-        background: #f8fafc; border: 1px solid #e2e8f0;
-        border-radius: 8px; padding: 10px 14px; margin: 6px 0;
-        font-size: 13px; color: #475569; font-family: monospace;
+        background: #f8fafc;
+        border: 1px solid #e2e8f0;
+        border-radius: 8px;
+        padding: 10px 14px;
+        margin: 6px 0;
+        font-size: 13px;
+        color: #475569;
+        font-family: monospace;
     }
-    #MainMenu {visibility: hidden;} footer {visibility: hidden;}
-    .status-ready { background: #dcfce7; color: #166534; padding: 4px 12px; border-radius: 20px; font-size: 13px; font-weight: 500; }
-    .status-waiting { background: #fef9c3; color: #854d0e; padding: 4px 12px; border-radius: 20px; font-size: 13px; font-weight: 500; }
+    #MainMenu {visibility: hidden;}
+    footer {visibility: hidden;}
+    .status-ready {
+        background: #dcfce7;
+        color: #166534;
+        padding: 4px 12px;
+        border-radius: 20px;
+        font-size: 13px;
+        font-weight: 500;
+    }
+    .status-waiting {
+        background: #fef9c3;
+        color: #854d0e;
+        padding: 4px 12px;
+        border-radius: 20px;
+        font-size: 13px;
+        font-weight: 500;
+    }
 </style>
 """, unsafe_allow_html=True)
 
+# ─── CONSTANTS ────────────────────────────────────────────
 CHROMA_PATH = "./chroma_db_streamlit"
 CHUNK_SIZE = 1000
 CHUNK_OVERLAP = 200
 TOP_K = 3
 
-SYSTEM_PROMPT = """You are a professional document assistant.
-Answer ONLY from the context provided.
-If the answer is not in the document, say: "I don't find that information in the uploaded document."
-Be concise and direct."""
+SYSTEM_PROMPT = """You are a professional document assistant. Your job is to answer \
+questions based strictly on the provided document context.
 
-# ─── SESSION STATE ────────────────────────────────────────
+Rules:
+- Answer ONLY from the context provided. Do not use outside knowledge.
+- If the answer is not in the document, say clearly: "I don't find that information in the uploaded document."
+- Be concise and direct. Use bullet points for lists.
+- If the user refers to something from earlier in the conversation, use the chat history to understand what they mean.
+- Always be professional and helpful."""
+
+# ─── SESSION STATE INIT ───────────────────────────────────
 if "messages" not in st.session_state:
     st.session_state.messages = []
+
+if "chat_history" not in st.session_state:
+    st.session_state.chat_history = []
+
 if "vectorstore" not in st.session_state:
     st.session_state.vectorstore = None
+
 if "chain" not in st.session_state:
     st.session_state.chain = None
+
 if "pdf_name" not in st.session_state:
     st.session_state.pdf_name = None
+
 if "embeddings" not in st.session_state:
-    with st.spinner("Loading embedding model..."):
+    with st.spinner("Loading embedding model (first time only)..."):
         st.session_state.embeddings = HuggingFaceEmbeddings(
             model_name="all-MiniLM-L6-v2",
             model_kwargs={"device": "cpu"}
         )
+
 if "api_key_valid" not in st.session_state:
     st.session_state.api_key_valid = bool(os.getenv("MISTRAL_API_KEY"))
+
+if "chat_history" not in st.session_state:
+    st.session_state.chat_history = []
 
 # ─── FUNCTIONS ────────────────────────────────────────────
 
@@ -85,6 +138,7 @@ def build_chain(vectorstore):
 
     prompt = ChatPromptTemplate.from_messages([
         ("system", SYSTEM_PROMPT + "\n\nDocument context:\n{context}"),
+        MessagesPlaceholder(variable_name="history"),
         ("human", "{question}")
     ])
 
@@ -95,14 +149,15 @@ def build_chain(vectorstore):
         )
 
     chain = (
-        {
-            "context": retriever | format_docs,
-            "question": RunnablePassthrough()
-        }
-        | prompt
-        | llm
-        | StrOutputParser()
-    )
+    {
+        "context": (lambda x: x["question"]) | retriever | format_docs,
+        "question": lambda x: x["question"],
+        "history": lambda x: x["history"]
+    }
+    | prompt
+    | llm
+    | StrOutputParser()
+)
     return chain
 
 
@@ -167,7 +222,11 @@ with st.sidebar:
     st.divider()
     st.subheader("Upload Document")
 
-    uploaded_file = st.file_uploader("Choose a PDF file", type=["pdf"])
+    uploaded_file = st.file_uploader(
+        "Choose a PDF file",
+        type=["pdf"],
+        help="Upload the PDF you want to chat with"
+    )
 
     if uploaded_file and uploaded_file.name != st.session_state.pdf_name:
         with st.spinner(f"Processing {uploaded_file.name}..."):
@@ -175,18 +234,26 @@ with st.sidebar:
         if success:
             st.session_state.pdf_name = uploaded_file.name
             st.session_state.messages = []
+            st.session_state.chat_history = []
             count = st.session_state.vectorstore._collection.count()
             st.success(f"✓ Ready! ({count} chunks indexed)")
 
     st.divider()
     if st.session_state.pdf_name:
-        st.markdown(f'<span class="status-ready">● {st.session_state.pdf_name}</span>', unsafe_allow_html=True)
+        st.markdown(
+            f'<span class="status-ready">● {st.session_state.pdf_name}</span>',
+            unsafe_allow_html=True
+        )
     else:
-        st.markdown('<span class="status-waiting">● No document uploaded</span>', unsafe_allow_html=True)
+        st.markdown(
+            '<span class="status-waiting">● No document uploaded</span>',
+            unsafe_allow_html=True
+        )
 
     st.divider()
     if st.button("🗑️ Clear Conversation", use_container_width=True):
         st.session_state.messages = []
+        st.session_state.chat_history = []
         st.rerun()
 
     st.divider()
@@ -208,15 +275,21 @@ if not st.session_state.messages:
 
 for msg in st.session_state.messages:
     if msg["role"] == "user":
-        st.markdown(f'<div class="user-message">{msg["content"]}</div>', unsafe_allow_html=True)
+        st.markdown(
+            f'<div class="user-message">{msg["content"]}</div>',
+            unsafe_allow_html=True
+        )
     else:
-        st.markdown(f'<div class="bot-message">{msg["content"]}</div>', unsafe_allow_html=True)
+        st.markdown(
+            f'<div class="bot-message">{msg["content"]}</div>',
+            unsafe_allow_html=True
+        )
         if msg.get("sources"):
             with st.expander(f"📚 Sources ({len(msg['sources'])} chunks used)"):
                 for i, source in enumerate(msg["sources"]):
                     st.markdown(
-                        f'<div class="source-chunk"><strong>Chunk {i+1} · Page {source.get("page","?")}</strong>'
-                        f'<br><br>{source.get("text","")}</div>',
+                        f'<div class="source-chunk"><strong>Chunk {i+1} · Page {source.get("page", "?")}</strong>'
+                        f'<br><br>{source.get("text", "")}</div>',
                         unsafe_allow_html=True
                     )
 
@@ -231,12 +304,22 @@ if user_input:
         st.warning("Please upload a PDF first.")
     else:
         st.session_state.messages.append({"role": "user", "content": user_input})
-        st.markdown(f'<div class="user-message">{user_input}</div>', unsafe_allow_html=True)
+
+        st.markdown(
+            f'<div class="user-message">{user_input}</div>',
+            unsafe_allow_html=True
+        )
 
         with st.spinner("Thinking..."):
             try:
-                answer = st.session_state.chain.invoke(user_input)
+                answer = st.session_state.chain.invoke({
+                "question": user_input,
+                "history": st.session_state.chat_history
+                })
                 sources = get_sources(user_input)
+
+                st.session_state.chat_history.append(HumanMessage(content=user_input))
+                st.session_state.chat_history.append(AIMessage(content=answer))
 
                 source_data = [
                     {
